@@ -320,7 +320,7 @@ export function AdminOverview() {
             </div>
             <div className="flex items-center justify-between mt-2">
               <span className="text-sm text-slate-500">إجمالي الحصص المسجلة</span>
-              <span className="text-lg font-bold text-slate-800">{sessionLogs.length}</span>
+              <span className="text-lg font-bold text-slate-800">{sessionLogs.reduce((sum, l) => sum + (l.session_count || 1), 0)}</span>
             </div>
           </div>
         </div>

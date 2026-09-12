@@ -56,7 +56,7 @@ export function AdminTeachers() {
       if (l.teacher_id !== teacherId || l.attendance_status !== 'حاضر') return false;
       const d = new Date(l.date);
       return d.getMonth() === month && d.getFullYear() === year;
-    }).length;
+    }).reduce((sum, l) => sum + (l.session_count || 1), 0);
     const teacher = teachers.find((t) => t.id === teacherId);
     return { completed, amount: completed * (teacher?.salary_per_session || 0) };
   }
@@ -426,7 +426,7 @@ function TeacherForm({
           />
         </div>
         <div>
-          <label className="block text-sm font-semibold text-slate-600 mb-1.5">الأجر لكل حصة (ج.م)</label>
+          <label className="block text-sm font-semibold text-slate-600 mb-1.5">الأجر لكل حصة ($)</label>
           <input
             type="number"
             className="input-field"

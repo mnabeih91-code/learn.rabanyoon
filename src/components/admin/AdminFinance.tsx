@@ -191,12 +191,12 @@ export function AdminFinance() {
       const d = new Date(l.date);
       return d.getMonth() === payrollMonth && d.getFullYear() === payrollYear;
     });
-    const attended = monthLogs.filter((l) => l.attendance_status === 'حاضر').length;
-    const teacherCanceled = monthLogs.filter((l) => l.attendance_status === 'اعتذار المعلم').length;
-    const studentExcused = monthLogs.filter((l) => l.attendance_status === 'اعتذار الطالب بعذر').length;
-    const studentAbsent = monthLogs.filter((l) => l.attendance_status === 'غائب بدون عذر').length;
+    const attended = monthLogs.filter((l) => l.attendance_status === 'حاضر').reduce((sum, l) => sum + (l.session_count || 1), 0);
+    const teacherCanceled = monthLogs.filter((l) => l.attendance_status === 'اعتذار المعلم').reduce((sum, l) => sum + (l.session_count || 1), 0);
+    const studentExcused = monthLogs.filter((l) => l.attendance_status === 'اعتذار الطالب بعذر').reduce((sum, l) => sum + (l.session_count || 1), 0);
+    const studentAbsent = monthLogs.filter((l) => l.attendance_status === 'غائب بدون عذر').reduce((sum, l) => sum + (l.session_count || 1), 0);
     // Teacher is owed for every session EXCEPT the ones they themselves canceled.
-    const payableSessions = monthLogs.length - teacherCanceled;
+    const payableSessions = monthLogs.reduce((sum, l) => l.attendance_status === 'اعتذار المعلم' ? sum : sum + (l.session_count || 1), 0);
     const netEarned = payableSessions * (teacher.salary_per_session || 0);
 
     // Get payroll entry for this teacher/month/year

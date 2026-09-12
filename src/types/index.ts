@@ -72,6 +72,7 @@ export interface SessionLog {
   student_alerts: string;
   notes: string;
   duration_minutes: number;
+  session_count: number;
   updated_at: string;
   session_number: number | null;
 }

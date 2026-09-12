@@ -123,7 +123,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     const cleanId = identifier.trim().toLowerCase();
     // Check admin (hardcoded admin credentials)
     if (cleanId === 'admin' || cleanId === 'admin@rabanyoon.edu' || cleanId === '01000000000') {
-      if (password === 'admin123') {
+      if (password === 'ِAllahakbr1@') {
         const user: AuthUser = { id: 'admin', name: 'مدير النظام', role: 'admin' };
         setCurrentRole('admin');
         setCurrentUser(user);
@@ -339,6 +339,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       student_alerts: log.student_alerts || '',
       notes: log.notes || '',
       duration_minutes: log.duration_minutes || 30,
+      session_count: log.session_count || 1,
       session_number: sessionNumber,
     }).select().single();
     if (error) throw error;
@@ -347,7 +348,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       if (log.attendance_status === 'حاضر') {
         const student = students.find((s) => s.id === log.student_id);
         if (student) {
-          await updateStudent(log.student_id, { total_sessions: student.total_sessions + 1 });
+          const count = log.session_count || 1;
+          await updateStudent(log.student_id, { total_sessions: student.total_sessions + count });
         }
       }
     }

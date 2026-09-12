@@ -139,7 +139,7 @@ export function TeacherSessionLogger() {
                         {student?.name || 'طالب محذوف'}
                       </h3>
                       <p className="text-xs text-slate-400">
-                        {log.type} — {log.duration_minutes} دقيقة
+                        {log.type} — {log.duration_minutes} دقيقة{(log.session_count || 1) > 1 ? ` (${log.session_count} حصص)` : ''}
                       </p>
                     </div>
                     {isPresent ? (
@@ -257,6 +257,7 @@ interface SessionLoggerData {
   student_alerts: string;
   notes: string;
   duration_minutes: number;
+  session_count: number;
 }
 
 function SessionLoggerModal({
@@ -291,6 +292,7 @@ function SessionLoggerModal({
   const [studentAlerts, setStudentAlerts] = useState('');
   const [notes, setNotes] = useState('');
   const [duration, setDuration] = useState(30);
+  const sessionCount = duration === 60 ? 2 : 1;
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -361,6 +363,7 @@ function SessionLoggerModal({
         student_alerts: isPresent && !isQuran ? studentAlerts : '',
         notes,
         duration_minutes: duration,
+        session_count: sessionCount,
       };
       await onSubmit(data);
     } catch (err) {
@@ -599,20 +602,46 @@ function SessionLoggerModal({
             </div>
           )}
 
-          {/* Duration — always shown, editable, defaults to 30 */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Field
-              label="مدة الحصة (دقيقة)"
-              icon={<Clock size={16} className="text-slate-500" />}
-            >
-              <input
-                type="number"
-                min={1}
-                className="input-field"
-                value={duration}
-                onChange={(e) => setDuration(Number(e.target.value) || 30)}
-              />
-            </Field>
+          {/* Duration — fixed options: 30 min (1 session) or 60 min (2 sessions) */}
+          <div>
+            <label className="flex items-center gap-1.5 text-sm font-semibold text-slate-600 mb-2">
+              <Clock size={16} className="text-slate-500" />
+              مدة الحصة
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setDuration(30)}
+                className={`flex flex-col items-center justify-center gap-1 py-3 rounded-xl font-semibold text-sm border-2 transition-all ${
+                  duration === 30
+                    ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
+                    : 'border-slate-200 text-slate-500 hover:border-slate-300'
+                }`}
+              >
+                <Clock size={18} />
+                <span>٣٠ دقيقة</span>
+                <span className="text-xs font-normal opacity-70">حصة واحدة</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setDuration(60)}
+                className={`flex flex-col items-center justify-center gap-1 py-3 rounded-xl font-semibold text-sm border-2 transition-all ${
+                  duration === 60
+                    ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
+                    : 'border-slate-200 text-slate-500 hover:border-slate-300'
+                }`}
+              >
+                <Clock size={18} />
+                <span>٦٠ دقيقة</span>
+                <span className="text-xs font-normal opacity-70">حصتان (مضاعفة)</span>
+              </button>
+            </div>
+            {duration === 60 && (
+              <p className="text-xs text-emerald-600 mt-1.5 flex items-center gap-1">
+                <CheckCircle2 size={12} />
+                ستُحتسب كحصتين في الأجر والخصم من الباقة
+              </p>
+            )}
           </div>
         </div>
       )}

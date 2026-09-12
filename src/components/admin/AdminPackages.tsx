@@ -237,7 +237,7 @@ function PackageCard({
               />
             </div>
             <div>
-              <label className="block text-xs font-semibold text-slate-500 mb-1">السعر (ج.م)</label>
+              <label className="block text-xs font-semibold text-slate-500 mb-1">السعر ($)</label>
               <input
                 type="number"
                 className="input-field text-sm"
@@ -353,7 +353,7 @@ function PackageForm({
             />
           </div>
           <div>
-            <label className="block text-sm font-semibold text-slate-600 mb-1.5">السعر (ج.م)</label>
+            <label className="block text-sm font-semibold text-slate-600 mb-1.5">السعر ($)</label>
             <input
               type="number"
               className="input-field"

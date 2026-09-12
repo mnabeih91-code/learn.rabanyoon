@@ -107,12 +107,7 @@ export function LoginPage() {
             </button>
           </form>
 
-          {/* Demo credentials hint */}
-          <div className="mt-6 pt-4 border-t border-slate-100">
-            <p className="text-xs text-slate-400 text-center">
-              بيانات تجريبية: المدير <span className="font-mono ltr-nums" dir="ltr">admin / admin123</span>
-            </p>
-          </div>
+
         </div>
       </div>
     </div>
