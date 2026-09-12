@@ -123,7 +123,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     const cleanId = identifier.trim().toLowerCase();
     // Check admin (hardcoded admin credentials)
     if (cleanId === 'admin' || cleanId === 'admin@rabanyoon.edu' || cleanId === '01000000000') {
-      if (password === 'ِAllahakbr1@') {
+      if (password === 'Allahakbr1@') {
         const user: AuthUser = { id: 'admin', name: 'مدير النظام', role: 'admin' };
         setCurrentRole('admin');
         setCurrentUser(user);
