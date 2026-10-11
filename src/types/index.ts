@@ -52,6 +52,8 @@ export interface Student {
   role: string;
   is_paused: boolean;
   student_code: string | null;
+  subscription_start_date: string | null;
+  is_deleted: boolean;
 }
 
 export interface SessionLog {
@@ -159,6 +161,18 @@ export interface PayrollEntry {
   year: number;
   bonuses: number;
   deductions: number;
+  updated_at: string;
+}
+
+export interface MonthlySubscription {
+  id: string;
+  student_id: string;
+  billing_year: number;
+  billing_month: number;
+  amount: number;
+  status: SubscriptionStatus;
+  payment_date: string | null;
+  created_at: string;
   updated_at: string;
 }
 

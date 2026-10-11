@@ -1,3 +1,7 @@
 [functions.stripe-checkout]
 verify_jwt = false
 entrypoint = "./functions/stripe-checkout/index.ts"
+
+[functions.monthly-billing]
+verify_jwt = false
+entrypoint = "./functions/monthly-billing/index.ts"

@@ -3,7 +3,7 @@ import { supabase } from '../lib/supabase';
 import type {
   Teacher, Student, SessionLog, Financial, Role, SubscriptionStatus,
   AvailabilitySlot, DayOfWeek, Package, AcademySettings, PayrollEntry, AuthUser,
-  PageConfig,
+  PageConfig, MonthlySubscription,
 } from '../types';
 import { generate24HourGrid, migrateTo24HourGrid } from '../data/mockData';
 import { DEFAULT_PAGE_CONFIG, resolvePageConfig } from '../data/pageConfigDefaults';
@@ -13,6 +13,7 @@ interface StoreContextValue {
   students: Student[];
   sessionLogs: SessionLog[];
   financials: Financial[];
+  monthlySubscriptions: MonthlySubscription[];
   packages: Package[];
   settings: AcademySettings | null;
   payroll: PayrollEntry[];
@@ -36,7 +37,7 @@ interface StoreContextValue {
   setAvailabilitySlots: (teacherId: string, slots: AvailabilitySlot[]) => Promise<void>;
   logSession: (log: Partial<SessionLog> & { student_id: string; teacher_id: string }) => Promise<void>;
   updateSession: (id: string, updates: Partial<SessionLog>) => Promise<void>;
-  setSubscriptionStatus: (studentId: string, status: SubscriptionStatus) => Promise<void>;
+  setSubscriptionStatus: (studentId: string, status: SubscriptionStatus, billingYear?: number, billingMonth?: number) => Promise<void>;
   createBooking: (name: string, phone: string, teacherId: string, packageId: string, selectedSlots: { day: DayOfWeek; start: string; end: string }[]) => Promise<void>;
   updatePackage: (id: string, updates: Partial<Package>) => Promise<void>;
   addPackage: (pkg: Partial<Package>) => Promise<void>;
@@ -69,7 +70,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const refresh = useCallback(async () => {
     try {
-      const [tRes, sRes, lRes, fRes, pRes, setRes, payRes] = await Promise.all([
+      const [tRes, sRes, lRes, fRes, pRes, setRes, payRes, msRes] = await Promise.all([
         supabase.from('teachers').select('*').order('created_at'),
         supabase.from('students').select('*').order('created_at'),
         supabase.from('sessions_log').select('*').order('date', { ascending: false }),
@@ -77,6 +78,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         supabase.from('packages').select('*').order('sort_order'),
         supabase.from('academy_settings').select('*').limit(1).maybeSingle(),
         supabase.from('payroll').select('*'),
+        supabase.from('monthly_subscriptions').select('*'),
       ]);
 
       if (tRes.error) throw tRes.error;
@@ -86,6 +88,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       if (pRes.error) throw pRes.error;
       if (setRes.error) throw setRes.error;
       if (payRes.error) throw payRes.error;
+      if (msRes.error) throw msRes.error;
 
       // Migrate old availability_slots to 24-hour grid if needed
       const teacherData = (tRes.data || []) as Teacher[];
@@ -98,13 +101,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }
 
       setTeachers(teacherData);
-      setStudents((sRes.data || []) as Student[]);
+      const studentData = (sRes.data || []).filter((s: Student) => !s.is_deleted) as Student[];
+      setStudents(studentData);
       setSessionLogs((lRes.data || []) as SessionLog[]);
       setFinancials((fRes.data || []) as Financial[]);
       setPackages((pRes.data || []) as Package[]);
       setSettings(setRes.data as AcademySettings | null);
       setPageConfig(resolvePageConfig((setRes.data as AcademySettings | null)?.page_config));
       setPayroll((payRes.data || []) as PayrollEntry[]);
+      setMonthlySubscriptions((msRes.data || []) as MonthlySubscription[]);
       setDbConnected(true);
     } catch (err) {
       console.error('Failed to fetch data:', err);
@@ -221,6 +226,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   // ============ STUDENT CRUD ============
   const addStudent = useCallback(async (s: Partial<Student>) => {
+    const startDate = s.subscription_start_date || new Date().toISOString().split('T')[0];
     const { data, error } = await supabase.from('students').insert({
       name: s.name,
       phone: s.phone || '',
@@ -234,14 +240,27 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       password: s.password || '123456',
       role: 'student',
       student_code: s.student_code || null,
+      subscription_start_date: startDate,
     }).select().single();
     if (error) throw error;
     if (data) {
       setStudents((prev) => [...prev, data as Student]);
+      // Create the first monthly subscription record for the start month
+      const startD = new Date(startDate);
+      const initStatus = s.subscription_status || 'pending';
+      await supabase.from('monthly_subscriptions').insert({
+        student_id: data.id,
+        billing_year: startD.getFullYear(),
+        billing_month: startD.getMonth(),
+        amount: s.monthly_fee || 0,
+        status: initStatus,
+        payment_date: initStatus === 'paid' ? new Date().toISOString() : null,
+      }).eq('student_id', data.id).eq('billing_year', startD.getFullYear()).eq('billing_month', startD.getMonth());
+      // Also create a financials record for backward compatibility
       await supabase.from('financials').insert({
         student_id: data.id,
         amount: s.monthly_fee || 0,
-        status: 'pending',
+        status: initStatus,
       });
       await refresh();
     }
@@ -254,7 +273,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setStudents((prev) => prev.map((s) => (s.id === id ? { ...s, ...updates } : s)));
   }, []);
 
-  // Toggle student paused status — paused students are excluded from financial ledger
+  // Toggle student paused status — paused students are excluded from new billing
+  // On reactivation: create current month subscription if missing (no retroactive billing)
   const toggleStudentPaused = useCallback(async (id: string) => {
     const student = students.find((s) => s.id === id);
     if (!student) return;
@@ -262,8 +282,30 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     const { error } = await supabase.from('students').update({ is_paused: newPaused }).eq('id', id);
     if (error) throw error;
     setStudents((prev) => prev.map((s) => (s.id === id ? { ...s, is_paused: newPaused } : s)));
-  }, [students]);
+    // If reactivating, create current month subscription if it doesn't exist
+    if (!newPaused && student.subscription_start_date) {
+      const now = new Date();
+      const { data: existing } = await supabase
+        .from('monthly_subscriptions')
+        .select('id')
+        .eq('student_id', id)
+        .eq('billing_year', now.getFullYear())
+        .eq('billing_month', now.getMonth())
+        .maybeSingle();
+      if (!existing) {
+        await supabase.from('monthly_subscriptions').insert({
+          student_id: id,
+          billing_year: now.getFullYear(),
+          billing_month: now.getMonth(),
+          amount: student.monthly_fee,
+          status: 'pending',
+        });
+        await refresh();
+      }
+    }
+  }, [students, refresh]);
 
+  // Soft-delete: preserve financial history, mark student as deleted
   const deleteStudent = useCallback(async (id: string) => {
     const student = students.find((s) => s.id === id);
     if (student && student.teacher_id && student.regular_slots) {
@@ -281,13 +323,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         await supabase.from('teachers').update({ availability_slots: newSlots }).eq('id', teacher.id);
       }
     }
-    const { error } = await supabase.from('students').delete().eq('id', id);
+    // Soft-delete: mark as deleted, preserve monthly_subscriptions history
+    const { error } = await supabase.from('students').update({ is_deleted: true, is_paused: true }).eq('id', id);
     if (error) throw error;
     setStudents((prev) => prev.filter((s) => s.id !== id));
-    setSessionLogs((prev) => prev.filter((l) => l.student_id !== id));
-    setFinancials((prev) => prev.filter((f) => f.student_id !== id));
-    await refresh();
-  }, [students, teachers, refresh]);
+  }, [students, teachers]);
 
   // ============ AVAILABILITY ============
   const toggleSlotStatus = useCallback(async (teacherId: string, slotIndex: number) => {
@@ -362,21 +402,51 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // ============ FINANCE ============
-  const setSubscriptionStatus = useCallback(async (studentId: string, status: SubscriptionStatus) => {
-    const student = students.find((s) => s.id === studentId);
-    if (!student) return;
-    let updates: Partial<Student> = { subscription_status: status };
-    if (status === 'paid') {
-      const currentExpiry = student.expiry_date ? new Date(student.expiry_date) : new Date();
-      const base = currentExpiry > new Date() ? currentExpiry : new Date();
-      base.setMonth(base.getMonth() + 1);
-      updates.expiry_date = base.toISOString().split('T')[0];
-    }
-    const { error } = await supabase.from('students').update(updates).eq('id', studentId);
+  // Update a monthly subscription record's status (with payment_date management)
+  // If billingYear/billingMonth are provided, update that specific record.
+  // Otherwise, update the student's current month record.
+  const setSubscriptionStatus = useCallback(async (
+    studentId: string,
+    status: SubscriptionStatus,
+    billingYear?: number,
+    billingMonth?: number
+  ) => {
+    const now = new Date();
+    const year = billingYear ?? now.getFullYear();
+    const month = billingMonth ?? now.getMonth();
+
+    const updateData: { status: SubscriptionStatus; payment_date: string | null } = {
+      status,
+      payment_date: status === 'paid' ? now.toISOString() : null,
+    };
+
+    const { data, error } = await supabase
+      .from('monthly_subscriptions')
+      .update(updateData)
+      .eq('student_id', studentId)
+      .eq('billing_year', year)
+      .eq('billing_month', month)
+      .select()
+      .maybeSingle();
     if (error) throw error;
-    await supabase.from('financials').update({ status }).eq('student_id', studentId);
-    setStudents((prev) => prev.map((s) => (s.id === studentId ? { ...s, ...updates } : s)));
-    setFinancials((prev) => prev.map((f) => (f.student_id === studentId ? { ...f, status } : f)));
+
+    if (data) {
+      setMonthlySubscriptions((prev) =>
+        prev.map((ms) => (ms.id === data.id ? { ...ms, ...data } as MonthlySubscription : ms))
+      );
+    }
+
+    // Also update the student's global subscription_status for backward compat
+    const studentUpdates: Partial<Student> = { subscription_status: status };
+    if (status === 'paid') {
+      const student = students.find((s) => s.id === studentId);
+      const currentExpiry = student?.expiry_date ? new Date(student.expiry_date) : new Date();
+      const base = currentExpiry > now ? currentExpiry : now;
+      base.setMonth(base.getMonth() + 1);
+      studentUpdates.expiry_date = base.toISOString().split('T')[0];
+    }
+    await supabase.from('students').update(studentUpdates).eq('id', studentId);
+    setStudents((prev) => prev.map((s) => (s.id === studentId ? { ...s, ...studentUpdates } : s)));
   }, [students]);
 
   // ============ STRIPE PAYMENT ============
@@ -430,40 +500,65 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [financials, setSubscriptionStatus]);
 
   // ============ AUTO-BILLING ============
-  // Auto-create pending invoice for next month as expiry approaches
+  // Calls the monthly-billing edge function which:
+  // 1. Marks previous month's pending records as overdue
+  // 2. Creates current month pending records for active students (idempotent)
   const runAutoBilling = useCallback(async () => {
-    const now = new Date();
-    const threshold = new Date();
-    threshold.setDate(threshold.getDate() + 7); // 7 days before expiry
+    try {
+      const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/monthly-billing`;
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+        },
+        body: JSON.stringify({}),
+      });
+      if (!response.ok) throw new Error(`Billing failed (${response.status})`);
+    } catch (err) {
+      console.error('Monthly billing error, falling back to client-side:', err);
+      // Fallback: run billing client-side if edge function is unavailable
+      const now = new Date();
+      const currentYear = now.getFullYear();
+      const currentMonth = now.getMonth();
+      const prevDate = new Date(currentYear, currentMonth - 1, 1);
+      const prevYear = prevDate.getFullYear();
+      const prevMonth = prevDate.getMonth();
 
-    for (const student of students) {
-      if (student.is_paused) continue;
-      if (!student.expiry_date) continue;
-      const expiry = new Date(student.expiry_date);
-      // If expiry is within 7 days and no pending invoice exists for next month
-      if (expiry <= threshold && expiry >= now) {
-        const nextMonth = new Date(expiry);
-        nextMonth.setMonth(nextMonth.getMonth() + 1);
-        // Check if a financial record already exists for this period
-        const existingRecord = financials.find((f) => {
-          const fDate = new Date(f.created_at);
-          return f.student_id === student.id &&
-            fDate.getFullYear() === nextMonth.getFullYear() &&
-            fDate.getMonth() === nextMonth.getMonth();
-        });
-        if (!existingRecord) {
-          await supabase.from('financials').insert({
+      for (const student of students) {
+        if (student.is_paused) continue;
+        if (!student.subscription_start_date) continue;
+        const startDate = new Date(student.subscription_start_date);
+        if (currentYear < startDate.getFullYear() || (currentYear === startDate.getFullYear() && currentMonth < startDate.getMonth())) continue;
+
+        // Mark previous month as overdue if pending
+        const prevIsBeforeStart = prevYear < startDate.getFullYear() || (prevYear === startDate.getFullYear() && prevMonth < startDate.getMonth());
+        if (!prevIsBeforeStart) {
+          const prevSub = monthlySubscriptions.find(
+            (ms) => ms.student_id === student.id && ms.billing_year === prevYear && ms.billing_month === prevMonth
+          );
+          if (prevSub && prevSub.status === 'pending') {
+            await supabase.from('monthly_subscriptions').update({ status: 'overdue' }).eq('id', prevSub.id);
+          }
+        }
+
+        // Create current month if missing (idempotent)
+        const existing = monthlySubscriptions.find(
+          (ms) => ms.student_id === student.id && ms.billing_year === currentYear && ms.billing_month === currentMonth
+        );
+        if (!existing) {
+          await supabase.from('monthly_subscriptions').insert({
             student_id: student.id,
+            billing_year: currentYear,
+            billing_month: currentMonth,
             amount: student.monthly_fee,
             status: 'pending',
           });
-          // Update student subscription status to pending
-          await supabase.from('students').update({ subscription_status: 'pending' }).eq('id', student.id);
         }
       }
     }
     await refresh();
-  }, [students, financials, refresh]);
+  }, [students, monthlySubscriptions, refresh]);
 
   // ============ BOOKING ============
   const createBooking = useCallback(async (
@@ -549,7 +644,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [payroll]);
 
   const value: StoreContextValue = {
-    teachers, students, sessionLogs, financials, packages, settings, payroll,
+    teachers, students, sessionLogs, financials, monthlySubscriptions, packages, settings, payroll,
     dbConnected, loading, currentRole, currentUser,
     login, logout, changePassword,
     addTeacher, updateTeacher, deleteTeacher, archiveTeacher, reactivateTeacher,
