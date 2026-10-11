@@ -17,17 +17,18 @@ Deno.serve(async (req: Request) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    // Fetch all active (non-paused) students with a subscription_start_date
-    const { data: students, error: fetchErr } = await supabase
-      .from("students")
-      .select("id, monthly_fee, subscription_start_date, is_paused, subscription_status")
-      .eq("is_paused", false);
-
-    if (fetchErr) throw fetchErr;
-
     const now = new Date();
     const currentYear = now.getFullYear();
     const currentMonth = now.getMonth(); // 0-11
+
+    // Fetch all active (non-paused, non-deleted) students with a subscription_start_date
+    const { data: students, error: fetchErr } = await supabase
+      .from("students")
+      .select("id, monthly_fee, subscription_start_date, is_paused, is_deleted, subscription_status")
+      .eq("is_paused", false)
+      .eq("is_deleted", false);
+
+    if (fetchErr) throw fetchErr;
 
     let createdCount = 0;
     let updatedCount = 0;
@@ -50,7 +51,6 @@ Deno.serve(async (req: Request) => {
       const prevYear = prevDate.getFullYear();
       const prevMonth = prevDate.getMonth();
 
-      // Only check previous month if it's after or equal to the student's start month
       const prevIsBeforeStart = prevYear < startYear || (prevYear === startYear && prevMonth < startMonth);
 
       if (!prevIsBeforeStart) {
@@ -95,15 +95,15 @@ Deno.serve(async (req: Request) => {
             status: "pending",
           });
         if (insertErr) {
-          errors.push(`Failed to create current month for ${student.id}: ${insertErr.message}`);
+          // Ignore unique constraint violations (race condition safety)
+          if (!insertErr.message.includes("duplicate") && !insertErr.message.includes("unique")) {
+            errors.push(`Failed to create current month for ${student.id}: ${insertErr.message}`);
+          }
         } else {
           createdCount++;
         }
       }
     }
-
-    // Also handle reactivated students — create current month if missing
-    // (covered by the loop above since we fetch is_paused=false students)
 
     return new Response(
       JSON.stringify({

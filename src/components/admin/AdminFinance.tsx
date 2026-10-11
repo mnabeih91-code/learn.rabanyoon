@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { useStore } from '../../store/StoreContext';
 import {
   formatCurrency,
@@ -127,6 +127,7 @@ export function AdminFinance() {
     financials,
     confirmStripePayment,
     runAutoBilling,
+    monthlySubscriptions,
   } = useStore();
   const [filter, setFilter] = useState<'all' | 'paid' | 'pending' | 'overdue'>('all');
   const [search, setSearch] = useState('');
@@ -141,43 +142,49 @@ export function AdminFinance() {
   const [payrollMonth, setPayrollMonth] = useState(now.getMonth());
   const [payrollYear, setPayrollYear] = useState(now.getFullYear());
 
-  // Filter students by subscription status, search, AND selected month/year
-  // EXCLUDE paused students from the financial ledger
-  // A student is "relevant" to a month/year if their created_at or expiry_date falls in that period
-  const filtered = students.filter((s) => {
-    if (s.is_paused) return false; // Paused students excluded from financial ledger
-    if (filter !== 'all' && s.subscription_status !== filter) return false;
-    if (search && !s.name.includes(search)) return false;
+  // Monthly subscription records for the selected month/year
+  const monthRecords = useMemo(() => {
+    return monthlySubscriptions.filter(
+      (ms) => ms.billing_year === subYear && ms.billing_month === subMonth
+    );
+  }, [monthlySubscriptions, subYear, subMonth]);
 
-    // Month/Year filter: show students whose created_at month/year matches,
-    // or whose expiry_date month/year matches, or who have a financial record in that period
-    const createdDate = new Date(s.created_at);
-    const createdMatch = createdDate.getMonth() === subMonth && createdDate.getFullYear() === subYear;
+  // Previous overdue balance: sum of overdue/pending from months BEFORE the selected month
+  const prevOverdueRecords = useMemo(() => {
+    return monthlySubscriptions.filter((ms) => {
+      if (ms.billing_year > subYear) return false;
+      if (ms.billing_year === subYear && ms.billing_month >= subMonth) return false;
+      return ms.status === 'overdue' || ms.status === 'pending';
+    });
+  }, [monthlySubscriptions, subYear, subMonth]);
 
-    let expiryMatch = false;
-    if (s.expiry_date) {
-      const expDate = new Date(s.expiry_date);
-      expiryMatch = expDate.getMonth() === subMonth && expDate.getFullYear() === subYear;
+  const prevOverdueTotal = prevOverdueRecords.reduce((sum, ms) => sum + ms.amount, 0);
+  const prevOverdueCount = prevOverdueRecords.length;
+
+  // Filter monthly records by status and search
+  const filteredRecords = monthRecords.filter((ms) => {
+    if (filter !== 'all' && ms.status !== filter) return false;
+    if (search) {
+      const student = students.find((s) => s.id === ms.student_id);
+      if (!student || !student.name.includes(search)) return false;
     }
-
-    return createdMatch || expiryMatch;
+    return true;
   });
 
-  // Summary cards also exclude paused students
-  const activeStudents = students.filter((s) => !s.is_paused);
-  const totalPaid = activeStudents
-    .filter((s) => s.subscription_status === 'paid')
-    .reduce((sum, s) => sum + s.monthly_fee, 0);
-  const totalPending = activeStudents
-    .filter((s) => s.subscription_status === 'pending')
-    .reduce((sum, s) => sum + s.monthly_fee, 0);
-  const totalOverdue = activeStudents
-    .filter((s) => s.subscription_status === 'overdue')
-    .reduce((sum, s) => sum + s.monthly_fee, 0);
+  // Summary cards based on selected month records
+  const totalPaid = monthRecords
+    .filter((ms) => ms.status === 'paid')
+    .reduce((sum, ms) => sum + ms.amount, 0);
+  const totalPending = monthRecords
+    .filter((ms) => ms.status === 'pending')
+    .reduce((sum, ms) => sum + ms.amount, 0);
+  const totalOverdue = monthRecords
+    .filter((ms) => ms.status === 'overdue')
+    .reduce((sum, ms) => sum + ms.amount, 0);
 
-  const paidCount = activeStudents.filter((s) => s.subscription_status === 'paid').length;
-  const pendingCount = activeStudents.filter((s) => s.subscription_status === 'pending').length;
-  const overdueCount = activeStudents.filter((s) => s.subscription_status === 'overdue').length;
+  const paidCount = monthRecords.filter((ms) => ms.status === 'paid').length;
+  const pendingCount = monthRecords.filter((ms) => ms.status === 'pending').length;
+  const overdueCount = monthRecords.filter((ms) => ms.status === 'overdue').length;
 
   // Pending Stripe payments awaiting admin confirmation
   const pendingStripePayments = financials.filter(
@@ -246,7 +253,7 @@ export function AdminFinance() {
               </p>
             </div>
           </div>
-          <p className="text-xs text-slate-400">{paidCount} طالب مدفوع</p>
+          <p className="text-xs text-slate-400">{paidCount} اشتراك مدفوع</p>
         </div>
         <div className="card p-5 border-amber-200/50 transition-all duration-300 hover:shadow-elevated">
           <div className="flex items-center gap-3 mb-2">
@@ -254,13 +261,13 @@ export function AdminFinance() {
               <Clock size={20} className="text-amber-600" />
             </div>
             <div>
-              <p className="text-xs text-slate-500">معلق</p>
+              <p className="text-xs text-slate-500">معلق للشهر الحالي</p>
               <p className="text-lg font-bold text-amber-600 transition-all duration-300">
                 {formatCurrency(totalPending)}
               </p>
             </div>
           </div>
-          <p className="text-xs text-slate-400">{pendingCount} طالب بانتظار الدفع</p>
+          <p className="text-xs text-slate-400">{pendingCount} اشتراك معلق</p>
         </div>
         <div className="card p-5 border-rose-200/50 transition-all duration-300 hover:shadow-elevated">
           <div className="flex items-center gap-3 mb-2">
@@ -268,13 +275,32 @@ export function AdminFinance() {
               <AlertCircle size={20} className="text-rose-600" />
             </div>
             <div>
-              <p className="text-xs text-slate-500">متأخر</p>
+              <p className="text-xs text-slate-500">متأخر للشهر الحالي</p>
               <p className="text-lg font-bold text-rose-600 transition-all duration-300">
                 {formatCurrency(totalOverdue)}
               </p>
             </div>
           </div>
-          <p className="text-xs text-slate-400">{overdueCount} طالب متأخر السداد</p>
+          <p className="text-xs text-slate-400">{overdueCount} اشتراك متأخر</p>
+        </div>
+      </div>
+
+      {/* Previous Overdue Balance Card */}
+      <div className="card p-5 border-rose-200/30 bg-rose-50/30">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-rose-100 rounded-xl flex items-center justify-center">
+              <AlertCircle size={20} className="text-rose-600" />
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-slate-600">إجمالي المتأخرات السابقة</p>
+              <p className="text-xs text-slate-400">رصود غير محصلة من أشهر سابقة قبل {MONTHS_AR[subMonth]} {subYear}</p>
+            </div>
+          </div>
+          <div className="text-left">
+            <p className="text-xl font-bold text-rose-600">{formatCurrency(prevOverdueTotal)}</p>
+            <p className="text-xs text-slate-400">{prevOverdueCount} اشتراك</p>
+          </div>
         </div>
       </div>
 
@@ -402,16 +428,18 @@ export function AdminFinance() {
                 <th className="text-right px-5 py-3 text-xs font-bold text-slate-500 uppercase">المعلم</th>
                 <th className="text-right px-5 py-3 text-xs font-bold text-slate-500 uppercase">الرسوم</th>
                 <th className="text-right px-5 py-3 text-xs font-bold text-slate-500 uppercase">الحالة</th>
-                <th className="text-right px-5 py-3 text-xs font-bold text-slate-500 uppercase">ينتهي في</th>
+                <th className="text-right px-5 py-3 text-xs font-bold text-slate-500 uppercase">تاريخ الدفع</th>
                 <th className="text-right px-5 py-3 text-xs font-bold text-slate-500 uppercase">تغيير الحالة</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {filtered.map((student) => {
+              {filteredRecords.map((ms) => {
+                const student = students.find((s) => s.id === ms.student_id);
+                if (!student) return null;
                 const teacher = teachers.find((t) => t.id === student.teacher_id);
-                const sc = statusConfig[student.subscription_status];
+                const sc = statusConfig[ms.status];
                 return (
-                  <tr key={student.id} className="hover:bg-slate-50 transition-colors">
+                  <tr key={ms.id} className="hover:bg-slate-50 transition-colors">
                     <td className="px-5 py-3">
                       <div className="flex items-center gap-3">
                         <Avatar name={student.name} size="sm" />
@@ -425,7 +453,7 @@ export function AdminFinance() {
                       <p className="text-sm text-slate-600">{teacher?.name || '—'}</p>
                     </td>
                     <td className="px-5 py-3">
-                      <p className="text-sm font-semibold text-slate-700">{formatCurrency(student.monthly_fee)}</p>
+                      <p className="text-sm font-semibold text-slate-700">{formatCurrency(ms.amount)}</p>
                     </td>
                     <td className="px-5 py-3">
                       <span className={`badge ${sc.bg} ${sc.text} transition-all duration-300`}>
@@ -435,13 +463,13 @@ export function AdminFinance() {
                     </td>
                     <td className="px-5 py-3">
                       <p className="text-sm text-slate-500">
-                        {student.expiry_date ? formatDate(student.expiry_date) : '—'}
+                        {ms.payment_date ? formatDate(ms.payment_date) : '—'}
                       </p>
                     </td>
                     <td className="px-5 py-3">
                       <StatusDropdown
-                        current={student.subscription_status}
-                        onChange={(status) => setSubscriptionStatus(student.id, status)}
+                        current={ms.status}
+                        onChange={(status) => setSubscriptionStatus(student.id, status, ms.billing_year, ms.billing_month)}
                       />
                     </td>
                   </tr>
@@ -450,7 +478,7 @@ export function AdminFinance() {
             </tbody>
           </table>
         </div>
-        {filtered.length === 0 && (
+        {filteredRecords.length === 0 && (
           <div className="text-center py-12 text-slate-400">
             <DollarSign size={32} className="mx-auto mb-2 opacity-50" />
             <p>لا توجد نتائج</p>

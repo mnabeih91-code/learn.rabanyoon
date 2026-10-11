@@ -59,6 +59,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [students, setStudents] = useState<Student[]>([]);
   const [sessionLogs, setSessionLogs] = useState<SessionLog[]>([]);
   const [financials, setFinancials] = useState<Financial[]>([]);
+  const [monthlySubscriptions, setMonthlySubscriptions] = useState<MonthlySubscription[]>([]);
   const [packages, setPackages] = useState<Package[]>([]);
   const [settings, setSettings] = useState<AcademySettings | null>(null);
   const [pageConfig, setPageConfig] = useState<PageConfig>(DEFAULT_PAGE_CONFIG);
@@ -255,7 +256,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         amount: s.monthly_fee || 0,
         status: initStatus,
         payment_date: initStatus === 'paid' ? new Date().toISOString() : null,
-      }).eq('student_id', data.id).eq('billing_year', startD.getFullYear()).eq('billing_month', startD.getMonth());
+      });
       // Also create a financials record for backward compatibility
       await supabase.from('financials').insert({
         student_id: data.id,

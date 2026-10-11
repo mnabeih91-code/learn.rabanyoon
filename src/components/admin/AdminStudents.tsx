@@ -9,7 +9,7 @@ import {
 } from '../../data/mockData';
 import { Avatar } from '../ui/Avatar';
 import { Modal } from '../ui/Modal';
-import type { Student, SubscriptionStatus, Teacher, DayOfWeek } from '../../types';
+import type { Student, SubscriptionStatus, Teacher, DayOfWeek, MonthlySubscription } from '../../types';
 import {
   Plus,
   Pencil,
@@ -41,8 +41,27 @@ const SUB_META: Record<
   overdue: { bg: 'bg-rose-100', text: 'text-rose-700', icon: <AlertCircle size={12} /> },
 };
 
+function computeFinancialStatus(student: Student, monthlySubs: MonthlySubscription[]): SubscriptionStatus {
+  if (student.is_paused) return 'pending';
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentMonth = now.getMonth();
+  // Check if any month before current has unpaid (pending or overdue) → highest priority = overdue
+  const hasOlderUnpaid = monthlySubs.some(
+    (ms) => ms.student_id === student.id &&
+      (ms.billing_year < currentYear || (ms.billing_year === currentYear && ms.billing_month < currentMonth)) &&
+      (ms.status === 'pending' || ms.status === 'overdue')
+  );
+  if (hasOlderUnpaid) return 'overdue';
+  // Otherwise show current month's status
+  const currentSub = monthlySubs.find(
+    (ms) => ms.student_id === student.id && ms.billing_year === currentYear && ms.billing_month === currentMonth
+  );
+  return currentSub?.status || student.subscription_status || 'pending';
+}
+
 export function AdminStudents() {
-  const { students, teachers, addStudent, updateStudent, deleteStudent, setAvailabilitySlots, toggleStudentPaused } = useStore();
+  const { students, teachers, monthlySubscriptions, addStudent, updateStudent, deleteStudent, setAvailabilitySlots, toggleStudentPaused } = useStore();
   const [showAdd, setShowAdd] = useState(false);
   const [editing, setEditing] = useState<Student | null>(null);
   const [deleting, setDeleting] = useState<Student | null>(null);
@@ -56,9 +75,10 @@ export function AdminStudents() {
   const [statusFilter, setStatusFilter] = useState<'all' | 'paid' | 'pending' | 'overdue' | 'paused'>('all');
 
   const filteredStudents = students.filter((s) => {
+    const finStatus = computeFinancialStatus(s, monthlySubscriptions);
     if (teacherFilter !== 'all' && s.teacher_id !== teacherFilter) return false;
     if (statusFilter === 'paused' && !s.is_paused) return false;
-    if (statusFilter !== 'all' && statusFilter !== 'paused' && (s.is_paused || s.subscription_status !== statusFilter)) return false;
+    if (statusFilter !== 'all' && statusFilter !== 'paused' && (s.is_paused || finStatus !== statusFilter)) return false;
     if (searchQuery.trim()) {
       const q = searchQuery.trim().toLowerCase();
       if (!s.name.toLowerCase().includes(q) && !(s.phone || '').includes(q)) return false;
@@ -189,8 +209,9 @@ export function AdminStudents() {
             <tbody className="divide-y divide-slate-100">
               {filteredStudents.map((student) => {
                 const teacher = teachers.find((t) => t.id === student.teacher_id);
-                const sub = SUBSCRIPTION_LABELS[student.subscription_status];
-                const c = SUB_META[student.subscription_status];
+                const finStatus = computeFinancialStatus(student, monthlySubscriptions);
+                const sub = SUBSCRIPTION_LABELS[finStatus];
+                const c = SUB_META[finStatus];
                 return (
                   <tr key={student.id} className="hover:bg-slate-50 transition-colors">
                     <td className="px-5 py-3">
@@ -502,6 +523,7 @@ function StudentForm({
     subscription_status: (student?.subscription_status || 'pending') as SubscriptionStatus,
     monthly_fee: student?.monthly_fee || 600,
     expiry_date: student?.expiry_date || '',
+    subscription_start_date: student?.subscription_start_date || '',
     password: student?.password || '',
     student_code: student?.student_code || '',
   });
@@ -653,12 +675,29 @@ function StudentForm({
             >
               <option value="paid">مدفوع</option>
               <option value="pending">معلق</option>
-              <option value="overdue">متأخر</option>
+              {student && <option value="overdue">متأخر</option>}
             </select>
+            {!student && (
+              <p className="text-xs text-slate-400 mt-1">لا يمكن تسجيل طالب جديد بحالة "متأخر"</p>
+            )}
           </div>
         </div>
         <div>
-          <label className="block text-sm font-semibold text-slate-600 mb-1.5">تاريخ انتهاء الاشتراك</label>
+          <label className="block text-sm font-semibold text-slate-600 mb-1.5 flex items-center gap-1.5">
+            <Calendar size={14} className="text-emerald-600" />
+            تاريخ بداية الاشتراك
+          </label>
+          <input
+            type="date"
+            className="input-field"
+            value={form.subscription_start_date}
+            onChange={(e) => setForm({ ...form, subscription_start_date: e.target.value })}
+            dir="ltr"
+          />
+          <p className="text-xs text-slate-400 mt-1.5">تاريخ بدء فوترة الطالب. لن يتم إنشاء اشتراكات قبل هذا التاريخ.</p>
+        </div>
+        <div>
+          <label className="block text-sm font-semibold text-slate-600 mb-1.5">تاريخ انتهاء الاشتراك (قديم)</label>
           <input
             type="date"
             className="input-field"
@@ -793,6 +832,7 @@ function StudentForm({
                   subscription_status: form.subscription_status,
                   monthly_fee: form.monthly_fee,
                   expiry_date: form.expiry_date || null,
+                  subscription_start_date: form.subscription_start_date || null,
                   password: form.password,
                   regular_slots: student ? regularSlots : [],
                   student_code: form.student_code || null,
