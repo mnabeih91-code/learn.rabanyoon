@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useStore } from '../../store/StoreContext';
-import type { SubscriptionStatus } from '../../types';
-import { formatCurrency, formatDate, SUBSCRIPTION_LABELS } from '../../data/mockData';
+import type { SubscriptionStatus, Student, MonthlySubscription } from '../../types';
+import { formatCurrency, formatDate, SUBSCRIPTION_LABELS, MONTHS_AR } from '../../data/mockData';
 import { Avatar } from '../ui/Avatar';
 import {
   FileText,
@@ -16,14 +16,41 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 
+function computeFinancialStatus(student: Student, monthlySubs: MonthlySubscription[]): SubscriptionStatus {
+  if (student.is_paused) return 'pending';
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentMonth = now.getMonth();
+  const hasOlderUnpaid = monthlySubs.some(
+    (ms) => ms.student_id === student.id &&
+      (ms.billing_year < currentYear || (ms.billing_year === currentYear && ms.billing_month < currentMonth)) &&
+      (ms.status === 'pending' || ms.status === 'overdue')
+  );
+  if (hasOlderUnpaid) return 'overdue';
+  const currentSub = monthlySubs.find(
+    (ms) => ms.student_id === student.id && ms.billing_year === currentYear && ms.billing_month === currentMonth
+  );
+  return currentSub?.status || student.subscription_status || 'pending';
+}
+
 export function StudentInvoicing() {
-  const { students, financials, currentUser, createStripeCheckout } = useStore();
+  const { students, monthlySubscriptions, currentUser, createStripeCheckout } = useStore();
   const [paying, setPaying] = useState(false);
   const [stripeError, setStripeError] = useState<string | null>(null);
 
-  // CRITICAL PRIVACY: A student only ever sees their own invoice.
-  // No dropdown selector, no visibility into other students.
   const student = students.find((s) => s.id === currentUser?.student_id) || null;
+
+  const finStatus = useMemo(() => {
+    if (!student) return 'pending' as SubscriptionStatus;
+    return computeFinancialStatus(student, monthlySubscriptions);
+  }, [student, monthlySubscriptions]);
+
+  const studentMonthlySubs = useMemo(() => {
+    if (!student) return [];
+    return monthlySubscriptions
+      .filter((ms) => ms.student_id === student.id)
+      .sort((a, b) => b.billing_year - a.billing_year || b.billing_month - a.billing_month);
+  }, [student, monthlySubscriptions]);
 
   if (!student) {
     return (
@@ -34,7 +61,7 @@ export function StudentInvoicing() {
     );
   }
 
-  const sub = SUBSCRIPTION_LABELS[student.subscription_status];
+  const sub = SUBSCRIPTION_LABELS[finStatus];
   const statusConfig: Record<
     SubscriptionStatus,
     { icon: React.ReactNode; bg: string; border: string; text: string; showPayBtn: boolean }
@@ -61,10 +88,8 @@ export function StudentInvoicing() {
       showPayBtn: true,
     },
   };
-  const sc = statusConfig[student.subscription_status];
+  const sc = statusConfig[finStatus];
 
-  // Financial records for THIS student only
-  const studentFinancials = financials.filter((f) => f.student_id === student.id);
   const invoiceNumber = `INV-${student.id.slice(0, 8).toUpperCase()}-2026`;
 
   const daysUntilExpiry = student.expiry_date
@@ -79,7 +104,6 @@ export function StudentInvoicing() {
     try {
       const result = await createStripeCheckout(student.id);
       if (result?.url) {
-        // Redirect to Stripe Checkout
         window.location.href = result.url;
       } else {
         setStripeError('تعذر إنشاء جلسة الدفع. يرجى المحاولة مرة أخرى أو التواصل مع الإدارة.');
@@ -125,18 +149,18 @@ export function StudentInvoicing() {
 
         {/* Body */}
         <div className="p-6 space-y-4">
-          {/* Status Banner — keyed for smooth animation on change */}
+          {/* Status Banner */}
           <div
-            key={student.subscription_status}
+            key={finStatus}
             className={`flex items-center gap-3 p-4 rounded-xl ${sc.bg} ${sc.border} border transition-all duration-500 animate-fade-in`}
           >
             <div className={sc.text}>{sc.icon}</div>
             <div className="flex-1">
               <p className={`font-bold ${sc.text}`}>{sub.label}</p>
               <p className="text-xs text-slate-500">
-                {student.subscription_status === 'paid'
+                {finStatus === 'paid'
                   ? 'تم دفع الرسوم الشهرية بنجاح'
-                  : student.subscription_status === 'pending'
+                  : finStatus === 'pending'
                   ? 'بانتظار سداد الرسوم الشهرية'
                   : 'الرسوم متأخرة — يرجى السداد في أقرب وقت'}
               </p>
@@ -168,10 +192,10 @@ export function StudentInvoicing() {
                 <span className="font-semibold text-slate-700">
                   {student.expiry_date ? formatDate(student.expiry_date) : '—'}
                 </span>
-                {daysUntilExpiry !== null && daysUntilExpiry > 0 && daysUntilExpiry < 30 && student.subscription_status !== 'paid' && (
+                {daysUntilExpiry !== null && daysUntilExpiry > 0 && daysUntilExpiry < 30 && finStatus !== 'paid' && (
                   <p className="text-xs text-amber-600 mt-0.5">يتبقى {daysUntilExpiry} يوم</p>
                 )}
-                {daysUntilExpiry !== null && daysUntilExpiry < 0 && student.subscription_status !== 'paid' && (
+                {daysUntilExpiry !== null && daysUntilExpiry < 0 && finStatus !== 'paid' && (
                   <p className="text-xs text-rose-600 mt-0.5">تجاوز بـ {Math.abs(daysUntilExpiry)} يوم</p>
                 )}
               </div>
@@ -189,7 +213,7 @@ export function StudentInvoicing() {
           <div className="bg-slate-50 rounded-xl p-4 flex items-center justify-between">
             <span className="font-bold text-slate-700">المبلغ المستحق</span>
             <span className="text-2xl font-bold text-emerald-600">
-              {student.subscription_status === 'paid'
+              {finStatus === 'paid'
                 ? formatCurrency(0)
                 : formatCurrency(student.monthly_fee)}
             </span>
@@ -236,42 +260,45 @@ export function StudentInvoicing() {
         </div>
       </div>
 
-      {/* Financial Records — THIS student only */}
-      {studentFinancials.length > 0 && (
+      {/* Monthly Subscription History */}
+      {studentMonthlySubs.length > 0 && (
         <div className="card p-6 max-w-2xl mx-auto">
           <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
             <Receipt size={20} className="text-emerald-600" />
-            سجل المعاملات المالية
+            سجل الاشتراكات الشهرية
           </h3>
           <div className="space-y-2">
-            {studentFinancials.map((f) => {
-              const fSub = SUBSCRIPTION_LABELS[f.status];
+            {studentMonthlySubs.map((ms) => {
+              const msSub = SUBSCRIPTION_LABELS[ms.status];
               return (
                 <div
-                  key={f.id}
+                  key={ms.id}
                   className="flex items-center justify-between p-3 bg-slate-50 rounded-xl"
                 >
                   <div className="flex items-center gap-3">
                     <div className="w-9 h-9 bg-white rounded-lg flex items-center justify-center border border-slate-200">
-                      <Receipt size={16} className="text-slate-400" />
+                      <Calendar size={16} className="text-slate-400" />
                     </div>
                     <div>
                       <p className="text-sm font-semibold text-slate-700">
-                        {formatCurrency(f.amount)}
+                        {MONTHS_AR[ms.billing_month]} {ms.billing_year}
                       </p>
-                      <p className="text-xs text-slate-400">{formatDate(f.created_at)}</p>
+                      <p className="text-xs text-slate-400">
+                        {formatCurrency(ms.amount)}
+                        {ms.payment_date && ` — ${formatDate(ms.payment_date)}`}
+                      </p>
                     </div>
                   </div>
                   <span
                     className={`badge ${
-                      f.status === 'paid'
+                      ms.status === 'paid'
                         ? 'bg-emerald-100 text-emerald-700'
-                        : f.status === 'pending'
+                        : ms.status === 'pending'
                         ? 'bg-amber-100 text-amber-700'
                         : 'bg-rose-100 text-rose-700'
                     }`}
                   >
-                    {fSub.label}
+                    {msSub.label}
                   </span>
                 </div>
               );

@@ -568,10 +568,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   ) => {
     const pkg = packages.find((p) => p.id === packageId);
     const fee = pkg?.price || 0;
+    const todayDate = new Date().toISOString().split('T')[0];
     const { data: studentData, error: studentErr } = await supabase.from('students').insert({
       name, phone, teacher_id: teacherId, regular_slots: selectedSlots,
       total_sessions: 0, subscription_status: 'pending', status: 'طالب جديد',
       expiry_date: null, monthly_fee: fee, password: '123456', role: 'student',
+      subscription_start_date: todayDate,
     }).select().single();
     if (studentErr) throw studentErr;
     const teacher = teachers.find((t) => t.id === teacherId);
@@ -587,6 +589,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }
       await supabase.from('teachers').update({ availability_slots: newSlots }).eq('id', teacherId);
     }
+    const startD = new Date(todayDate);
+    await supabase.from('monthly_subscriptions').insert({
+      student_id: studentData.id,
+      billing_year: startD.getFullYear(),
+      billing_month: startD.getMonth(),
+      amount: fee,
+      status: 'pending',
+    });
     await supabase.from('financials').insert({ student_id: studentData.id, amount: fee, status: 'pending' });
     await refresh();
   }, [packages, teachers, refresh]);
