@@ -7,6 +7,9 @@ import type {
 } from '../types';
 import { generate24HourGrid, migrateTo24HourGrid } from '../data/mockData';
 import { DEFAULT_PAGE_CONFIG, resolvePageConfig } from '../data/pageConfigDefaults';
+import { getMonthlySubscriptionService } from '../services';
+import type { StudentLite } from '../services/types';
+import { shouldCreateReactivationSubscription } from '../services/billingLogic';
 
 interface StoreContextValue {
   teachers: Teacher[];
@@ -79,7 +82,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         supabase.from('packages').select('*').order('sort_order'),
         supabase.from('academy_settings').select('*').limit(1).maybeSingle(),
         supabase.from('payroll').select('*'),
-        supabase.from('monthly_subscriptions').select('*'),
+      getMonthlySubscriptionService().getMonthlySubscriptions(),
       ]);
 
       if (tRes.error) throw tRes.error;
@@ -89,7 +92,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       if (pRes.error) throw pRes.error;
       if (setRes.error) throw setRes.error;
       if (payRes.error) throw payRes.error;
-      if (msRes.error) throw msRes.error;
 
       // Migrate old availability_slots to 24-hour grid if needed
       const teacherData = (tRes.data || []) as Teacher[];
@@ -110,7 +112,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       setSettings(setRes.data as AcademySettings | null);
       setPageConfig(resolvePageConfig((setRes.data as AcademySettings | null)?.page_config));
       setPayroll((payRes.data || []) as PayrollEntry[]);
-      setMonthlySubscriptions((msRes.data || []) as MonthlySubscription[]);
+      setMonthlySubscriptions((msRes as MonthlySubscription[]) || []);
       setDbConnected(true);
     } catch (err) {
       console.error('Failed to fetch data:', err);
@@ -249,7 +251,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       // Create the first monthly subscription record for the start month
       const startD = new Date(startDate);
       const initStatus = s.subscription_status || 'pending';
-      await supabase.from('monthly_subscriptions').insert({
+      const subService = getMonthlySubscriptionService();
+      await subService.createMonthlySubscription({
         student_id: data.id,
         billing_year: startD.getFullYear(),
         billing_month: startD.getMonth(),
@@ -285,21 +288,25 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setStudents((prev) => prev.map((s) => (s.id === id ? { ...s, is_paused: newPaused } : s)));
     // If reactivating, create current month subscription if it doesn't exist
     if (!newPaused && student.subscription_start_date) {
-      const now = new Date();
-      const { data: existing } = await supabase
-        .from('monthly_subscriptions')
-        .select('id')
-        .eq('student_id', id)
-        .eq('billing_year', now.getFullYear())
-        .eq('billing_month', now.getMonth())
-        .maybeSingle();
-      if (!existing) {
-        await supabase.from('monthly_subscriptions').insert({
+      const subService = getMonthlySubscriptionService();
+      const studentSubs = await subService.getStudentMonthlySubscriptions(id);
+      const studentLite: StudentLite = {
+        id: student.id,
+        name: student.name,
+        monthly_fee: student.monthly_fee,
+        subscription_start_date: student.subscription_start_date,
+        is_paused: false,
+        is_deleted: false,
+        subscription_status: student.subscription_status,
+      };
+      if (shouldCreateReactivationSubscription(studentLite, studentSubs)) {
+        await subService.createMonthlySubscription({
           student_id: id,
-          billing_year: now.getFullYear(),
-          billing_month: now.getMonth(),
+          billing_year: new Date().getFullYear(),
+          billing_month: new Date().getMonth(),
           amount: student.monthly_fee,
           status: 'pending',
+          payment_date: null,
         });
         await refresh();
       }
@@ -416,26 +423,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     const year = billingYear ?? now.getFullYear();
     const month = billingMonth ?? now.getMonth();
 
-    const updateData: { status: SubscriptionStatus; payment_date: string | null } = {
-      status,
-      payment_date: status === 'paid' ? now.toISOString() : null,
-    };
+    const subService = getMonthlySubscriptionService();
+    await subService.updateStudentMonthlyStatus(studentId, status, year, month);
 
-    const { data, error } = await supabase
-      .from('monthly_subscriptions')
-      .update(updateData)
-      .eq('student_id', studentId)
-      .eq('billing_year', year)
-      .eq('billing_month', month)
-      .select()
-      .maybeSingle();
-    if (error) throw error;
-
-    if (data) {
-      setMonthlySubscriptions((prev) =>
-        prev.map((ms) => (ms.id === data.id ? { ...ms, ...data } as MonthlySubscription : ms))
-      );
-    }
+    // Refresh local state from the service
+    const updatedSubs = await subService.getMonthlySubscriptions();
+    setMonthlySubscriptions(updatedSubs as MonthlySubscription[]);
 
     // Also update the student's global subscription_status for backward compat
     const studentUpdates: Partial<Student> = { subscription_status: status };
@@ -505,61 +498,19 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   // 1. Marks previous month's pending records as overdue
   // 2. Creates current month pending records for active students (idempotent)
   const runAutoBilling = useCallback(async () => {
-    try {
-      const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/monthly-billing`;
-      const response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
-        },
-        body: JSON.stringify({}),
-      });
-      if (!response.ok) throw new Error(`Billing failed (${response.status})`);
-    } catch (err) {
-      console.error('Monthly billing error, falling back to client-side:', err);
-      // Fallback: run billing client-side if edge function is unavailable
-      const now = new Date();
-      const currentYear = now.getFullYear();
-      const currentMonth = now.getMonth();
-      const prevDate = new Date(currentYear, currentMonth - 1, 1);
-      const prevYear = prevDate.getFullYear();
-      const prevMonth = prevDate.getMonth();
-
-      for (const student of students) {
-        if (student.is_paused) continue;
-        if (!student.subscription_start_date) continue;
-        const startDate = new Date(student.subscription_start_date);
-        if (currentYear < startDate.getFullYear() || (currentYear === startDate.getFullYear() && currentMonth < startDate.getMonth())) continue;
-
-        // Mark previous month as overdue if pending
-        const prevIsBeforeStart = prevYear < startDate.getFullYear() || (prevYear === startDate.getFullYear() && prevMonth < startDate.getMonth());
-        if (!prevIsBeforeStart) {
-          const prevSub = monthlySubscriptions.find(
-            (ms) => ms.student_id === student.id && ms.billing_year === prevYear && ms.billing_month === prevMonth
-          );
-          if (prevSub && prevSub.status === 'pending') {
-            await supabase.from('monthly_subscriptions').update({ status: 'overdue' }).eq('id', prevSub.id);
-          }
-        }
-
-        // Create current month if missing (idempotent)
-        const existing = monthlySubscriptions.find(
-          (ms) => ms.student_id === student.id && ms.billing_year === currentYear && ms.billing_month === currentMonth
-        );
-        if (!existing) {
-          await supabase.from('monthly_subscriptions').insert({
-            student_id: student.id,
-            billing_year: currentYear,
-            billing_month: currentMonth,
-            amount: student.monthly_fee,
-            status: 'pending',
-          });
-        }
-      }
-    }
+    const subService = getMonthlySubscriptionService();
+    const studentLites: StudentLite[] = students.map((s) => ({
+      id: s.id,
+      name: s.name,
+      monthly_fee: s.monthly_fee,
+      subscription_start_date: s.subscription_start_date,
+      is_paused: s.is_paused,
+      is_deleted: s.is_deleted,
+      subscription_status: s.subscription_status,
+    }));
+    await subService.runMonthlyBilling(studentLites);
     await refresh();
-  }, [students, monthlySubscriptions, refresh]);
+  }, [students, refresh]);
 
   // ============ BOOKING ============
   const createBooking = useCallback(async (
@@ -590,12 +541,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       await supabase.from('teachers').update({ availability_slots: newSlots }).eq('id', teacherId);
     }
     const startD = new Date(todayDate);
-    await supabase.from('monthly_subscriptions').insert({
+    const subService = getMonthlySubscriptionService();
+    await subService.createMonthlySubscription({
       student_id: studentData.id,
       billing_year: startD.getFullYear(),
       billing_month: startD.getMonth(),
       amount: fee,
       status: 'pending',
+      payment_date: null,
     });
     await supabase.from('financials').insert({ student_id: studentData.id, amount: fee, status: 'pending' });
     await refresh();
